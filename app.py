@@ -5,17 +5,18 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from google import genai
 
 # ---------------- Page ----------------
-st.set_page_config(page_title="YouTube SEO AI Tool (World v3)", layout="wide")
-st.title("🌍 YouTube SEO AI Tool (World v3)")
-st.caption("Worldwide + Any Language | SEO Pack + 5–8 Rank Tags + SERP Competition + VidIQ-style Checklist Score")
+st.set_page_config(page_title="YouTube SEO AI Tool (World)", layout="wide")
+st.title("🌍 YouTube SEO AI Tool (World)")
+st.caption("Worldwide + Any Language | SEO Pack + 5–8 Rank Tags + SERP Competition + Checklist Score")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")
+# Streamlit Cloud Secrets থেকে নেবে
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "").strip()
 
 if not GEMINI_API_KEY:
-    st.warning("❗ GEMINI_API_KEY সেট করা নেই। Streamlit Secrets এ GEMINI_API_KEY বসাও।")
+    st.warning("❗ GEMINI_API_KEY সেট করা নেই। Manage app → Settings → Secrets এ বসাও।")
 
-# ---------------- Searchable lists (type to search) ----------------
+# ---------------- Searchable lists ----------------
 LANGUAGES = [
     "Auto",
     "English","Bengali","Hindi","Urdu","Turkish","Arabic","Spanish","French","German","Portuguese","Russian",
@@ -44,12 +45,22 @@ def extract_video_id(url: str) -> str:
     return m.group(1) if m else ""
 
 def yt_api_get(endpoint: str, params: dict) -> dict:
-    r = requests.get(endpoint, params=params, timeout=25)
-    r.raise_for_status()
-    return r.json()
+    # YouTube API সমস্যা হলে সুন্দর message দেখাবে
+    try:
+        r = requests.get(endpoint, params=params, timeout=25)
+        if r.status_code >= 400:
+            # readable error
+            try:
+                j = r.json()
+            except Exception:
+                j = {"error_text": r.text[:500]}
+            raise RuntimeError(f"YouTube API HTTP {r.status_code}: {j}")
+        return r.json()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"YouTube API request failed: {e}")
 
 def fetch_youtube_metadata(video_id: str) -> dict:
-    # title/desc/channel
+    # title/desc/channel (Optional)
     if not YOUTUBE_API_KEY:
         return {"title": "", "description": "", "channelTitle": "", "publishedAt": ""}
 
@@ -72,7 +83,6 @@ def fetch_transcript(video_id: str) -> str:
     try:
         tl = YouTubeTranscriptApi.list_transcripts(video_id)
         t = None
-        # try English first, then any available
         try:
             t = tl.find_transcript(["en"])
         except Exception:
@@ -86,7 +96,7 @@ def fetch_transcript(video_id: str) -> str:
         return ""
 
 def youtube_search_top(keyword: str, max_results: int = 10) -> list:
-    # SERP sample for competition indicator
+    # SERP competition indicator (Optional)
     if not YOUTUBE_API_KEY:
         return []
     endpoint = "https://www.googleapis.com/youtube/v3/search"
@@ -135,7 +145,7 @@ def iso_to_date(iso: str):
 def compute_competition(keyword: str) -> dict:
     results = youtube_search_top(keyword, max_results=10)
     if not results:
-        return {"level": "UNKNOWN", "score": 0, "notes": ["YouTube API key OFF / সার্চ ডাটা পাওয়া যায়নি"], "top": []}
+        return {"level": "UNKNOWN", "score": 0, "notes": ["YouTube API OFF / সার্চ ডাটা পাওয়া যায়নি"], "top": []}
 
     ids = [r["videoId"] for r in results][:8]
     stats = fetch_video_stats(ids)
@@ -174,18 +184,27 @@ def compute_competition(keyword: str) -> dict:
     return {"level": level, "score": score, "notes": notes, "top": results[:5]}
 
 def call_gemini(prompt: str) -> dict:
+    # ✅ স্থিতিশীল মডেল: gemini-1.5-flash
     if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing")
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    resp = client.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        raise RuntimeError("GEMINI_API_KEY missing. Add it in Streamlit Secrets.")
+
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        resp = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt,
+        )
+    except Exception as e:
+        # Streamlit এ readable error দেখাবে
+        raise RuntimeError(f"Gemini API error: {e}")
+
     text = (resp.text or "").strip()
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        raise ValueError("No JSON found in Gemini response.")
+        raise ValueError("Gemini response এ JSON পাওয়া যায়নি। আবার Try করো।")
     return json.loads(m.group(0))
 
 def calc_checklist_score(best_title: str, desc: str, tags: list, rank_tags: list, hashtags: list, main_kw: str):
-    # VidIQ-friendly checklist heuristic (ours)
     kw = (main_kw or "").strip().lower()
     title_ok = bool(kw) and kw in (best_title or "").lower()
 
@@ -236,7 +255,6 @@ def calc_checklist_score(best_title: str, desc: str, tags: list, rank_tags: list
     return breakdown, overall, fixes
 
 def build_prompt(video_url, meta, transcript, keyword, out_lang, out_country, comp_level, comp_score, comp_titles):
-    # Language instruction
     if (out_lang or "").lower() == "auto":
         lang_instruction = (
             "Auto-detect the most appropriate language from the video metadata/transcript, "
@@ -304,7 +322,7 @@ with st.sidebar:
     lang_mode = st.selectbox("Language Mode", ["Auto Detect", "Manual Select"], index=0)
 
     if lang_mode == "Manual Select":
-        out_lang = st.selectbox("Output Language", LANGUAGES, index=LANGUAGES.index("English") if "English" in LANGUAGES else 0)
+        out_lang = st.selectbox("Output Language", LANGUAGES, index=LANGUAGES.index("English"))
         custom_lang = st.text_input("Custom language (optional) — e.g., 'Spanish (Mexico)'", value="")
         final_lang = custom_lang.strip() if custom_lang.strip() else out_lang
         if final_lang.lower() == "auto":
@@ -321,116 +339,119 @@ with st.sidebar:
 
 video_url = st.text_input("Paste YouTube Video Link", value="")
 keyword = st.text_input("Main Keyword (client keyword)", value="")
-
 run = st.button("Generate Pro SEO Pack 🚀", type="primary")
 
 if run:
-    if not video_url.strip():
-        st.error("ভিডিও লিংক দাও।")
-        st.stop()
-    if not keyword.strip():
-        st.error("Main keyword দাও।")
-        st.stop()
+    try:
+        if not video_url.strip():
+            st.error("ভিডিও লিংক দাও।")
+            st.stop()
+        if not keyword.strip():
+            st.error("Main keyword দাও।")
+            st.stop()
 
-    vid = extract_video_id(video_url)
-    if not vid:
-        st.error("ভিডিও ID বের করতে পারলাম না—লিংকটা ঠিক আছে তো?")
-        st.stop()
+        vid = extract_video_id(video_url)
+        if not vid:
+            st.error("ভিডিও ID বের করতে পারলাম না—লিংকটা ঠিক আছে তো?")
+            st.stop()
 
-    with st.spinner("Fetching metadata / transcript / SERP competition..."):
-        meta = fetch_youtube_metadata(vid)
-        transcript = fetch_transcript(vid) if use_transcript else ""
-        comp = compute_competition(keyword.strip())
+        with st.spinner("Fetching metadata / transcript / SERP competition..."):
+            meta = fetch_youtube_metadata(vid)
+            transcript = fetch_transcript(vid) if use_transcript else ""
+            comp = compute_competition(keyword.strip())
 
-    st.subheader("📊 SERP Competition (YouTube Search)")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Level", comp.get("level"))
-    c2.metric("Score (0–100)", comp.get("score"))
-    c3.metric("YouTube API", "ON" if YOUTUBE_API_KEY else "OFF")
+        st.subheader("📊 SERP Competition (YouTube Search)")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Level", comp.get("level"))
+        c2.metric("Score (0–100)", comp.get("score"))
+        c3.metric("YouTube API", "ON" if YOUTUBE_API_KEY else "OFF")
 
-    with st.expander("Why this competition?"):
-        for n in comp.get("notes", []):
-            st.write("• " + n)
-        for x in comp.get("top", []):
-            st.write("- " + x.get("title", ""))
+        with st.expander("Why this competition?"):
+            for n in comp.get("notes", []):
+                st.write("• " + n)
+            for x in comp.get("top", []):
+                st.write("- " + x.get("title", ""))
 
-    with st.spinner("Generating SEO pack with Gemini..."):
-        prompt = build_prompt(
-            video_url,
-            meta,
-            transcript,
-            keyword.strip(),
-            final_lang or "Auto",
-            final_country or "Global",
-            comp.get("level"),
-            comp.get("score"),
-            [x.get("title", "") for x in comp.get("top", [])]
-        )
-        out = call_gemini(prompt)
+        with st.spinner("Generating SEO pack with Gemini..."):
+            prompt = build_prompt(
+                video_url,
+                meta,
+                transcript,
+                keyword.strip(),
+                final_lang or "Auto",
+                final_country or "Global",
+                comp.get("level"),
+                comp.get("score"),
+                [x.get("title", "") for x in comp.get("top", [])]
+            )
+            out = call_gemini(prompt)
 
-    # Extract
-    best_title = out.get("best_title", "")
-    desc = out.get("description", "")
-    tags = out.get("tags", []) or []
-    rank_tags = out.get("rank_tags", []) or []
-    hashtags = out.get("hashtags", []) or []
-    title_options = out.get("title_options", []) or []
-    viral_titles = out.get("viral_titles", []) or []
-    thumbnail_text = out.get("thumbnail_text", []) or []
-    low_kw = out.get("low_competition_keywords", []) or []
-    chapters = out.get("chapters", []) or []
-    pinned_comment = out.get("pinned_comment", "")
+        # Extract
+        best_title = out.get("best_title", "")
+        desc = out.get("description", "")
+        tags = out.get("tags", []) or []
+        rank_tags = out.get("rank_tags", []) or []
+        hashtags = out.get("hashtags", []) or []
+        title_options = out.get("title_options", []) or []
+        viral_titles = out.get("viral_titles", []) or []
+        thumbnail_text = out.get("thumbnail_text", []) or []
+        low_kw = out.get("low_competition_keywords", []) or []
+        chapters = out.get("chapters", []) or []
+        pinned_comment = out.get("pinned_comment", "")
 
-    breakdown, overall, fixes = calc_checklist_score(best_title, desc, tags, rank_tags, hashtags, keyword.strip())
+        breakdown, overall, fixes = calc_checklist_score(best_title, desc, tags, rank_tags, hashtags, keyword.strip())
 
-    # ---------------- Output ----------------
-    col1, col2 = st.columns([1, 1])
+        col1, col2 = st.columns([1, 1])
 
-    with col1:
-        st.subheader("✅ Best Title")
-        st.write(best_title)
+        with col1:
+            st.subheader("✅ Best Title")
+            st.write(best_title)
 
-        st.subheader("🎯 SEO Title Options (10)")
-        for t in title_options[:10]:
-            st.write("• " + t)
+            st.subheader("🎯 SEO Title Options (10)")
+            for t in title_options[:10]:
+                st.write("• " + t)
 
-        st.subheader("🔥 Viral Titles (10)")
-        for t in viral_titles[:10]:
-            st.write("• " + t)
+            st.subheader("🔥 Viral Titles (10)")
+            for t in viral_titles[:10]:
+                st.write("• " + t)
 
-        st.subheader("🖼 Thumbnail Text (5)")
-        for t in thumbnail_text[:5]:
-            st.write("• " + t)
+            st.subheader("🖼 Thumbnail Text (5)")
+            for t in thumbnail_text[:5]:
+                st.write("• " + t)
 
-        st.subheader("🔥 Rank Tags (EXACT 5–8)")
-        st.code("\n".join(rank_tags))
+            st.subheader("🔥 Rank Tags (EXACT 5–8)")
+            st.code("\n".join(rank_tags))
 
-        st.subheader("🏷️ Hashtags")
-        st.code(" ".join(hashtags))
+            st.subheader("🏷️ Hashtags")
+            st.code(" ".join(hashtags))
 
-        st.subheader("📌 Pinned Comment")
-        st.write(pinned_comment)
+            st.subheader("📌 Pinned Comment")
+            st.write(pinned_comment)
 
-    with col2:
-        st.subheader("📝 Description")
-        st.code(desc)
+        with col2:
+            st.subheader("📝 Description")
+            st.code(desc)
 
-        st.subheader("🔖 Tags (copy-paste)")
-        st.code(", ".join(tags))
+            st.subheader("🔖 Tags (copy-paste)")
+            st.code(", ".join(tags))
 
-        st.subheader("🕒 Chapters")
-        st.code("\n".join(chapters) if chapters else "")
+            st.subheader("🕒 Chapters")
+            st.code("\n".join(chapters) if chapters else "")
 
-        st.subheader("🔍 Low-Competition Keywords (10)")
-        for k in low_kw[:10]:
-            st.write("• " + k)
+            st.subheader("🔍 Low-Competition Keywords (10)")
+            for k in low_kw[:10]:
+                st.write("• " + k)
 
-        st.subheader("✅ VidIQ-friendly Checklist Score (0–100)")
-        st.json(breakdown)
-        st.metric("Overall Score", overall)
+            st.subheader("✅ VidIQ-friendly Checklist Score (0–100)")
+            st.json(breakdown)
+            st.metric("Overall Score", overall)
 
-        st.subheader("🛠️ Fix Suggestions (to push score up)")
-        for s in fixes[:10]:
-            st.write("• " + s)
+            st.subheader("🛠️ Fix Suggestions (to push score up)")
+            for s in fixes[:10]:
+                st.write("• " + s)
 
-    st.success("Done! কপি-পেস্ট করে ইউটিউবে বসাও।")
+        st.success("Done! কপি-পেস্ট করে ইউটিউবে বসাও।")
+
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
+        st.info("Manage app → Logs এ গেলে full details দেখবে।")
