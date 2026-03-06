@@ -1,5 +1,6 @@
 streamlit==1.37.1
-python-dotenv==1.0.1
+python-3.12.10
 google-genai==0.8.0
 requests==2.32.3
+
 youtube-transcript-api==0.6.2
